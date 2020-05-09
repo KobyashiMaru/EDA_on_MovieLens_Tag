@@ -1,0 +1,310 @@
+---
+title: "Tag_analyse"
+author: "Chun-Hao Hung"
+date: "November 27, 2019"
+output: html_document
+
+
+---
+```{r Import library, include=FALSE}
+
+
+
+library(readr)
+library(dplyr)
+library(tcltk)
+library(tcltk2)
+library(tidytext)
+library(purrr)
+library(foreach)
+library(doParallel)
+library(highcharter)
+library(shiny)
+
+
+
+```
+## Import Dataset
+
+```{r Import Dataset}
+
+tag_data = read_csv("C:/Users/bronc/Desktop/Movie_lens_dataset/tag.csv")
+movie_data = read_csv("C:/Users/bronc/Desktop/Movie_lens_dataset/movie.csv")
+
+
+tag_data %>% head()
+
+
+```
+
+
+Fix the movie Id issue
+```{r Fix the movie Id issue}
+
+
+tag_data = tag_data %>% mutate(index = seq(1:nrow(tag_data)))
+
+movie_data = movie_data %>% mutate(real_Id = seq(1:nrow(movie_data)))
+movie_data %>% head
+
+i = 1
+n = nrow(movie_data)
+
+for(i in seq(1:n)){
+  specific_Id_index_sequence = tag_data %>% 
+                               filter(movieId == (movie_data[i, ] %>% 
+                                                  select(movieId) %>% 
+                                                  unlist
+                                                  )
+                                      ) %>% 
+                               select(index) %>% 
+                               unlist %>% 
+                               unname
+  
+  tag_data$movieId[specific_Id_index_sequence] = i
+  
+  if(!exists("pb")) pb <- tkProgressBar("Parallel task", min=0, max=1)
+  
+  info <- sprintf("Completeness %d%%",round(i*100/n))
+  setTkProgressBar(pb,i/n ,sprintf("Progress (%s)",info),info)
+  
+}
+
+close(pb)
+remove(pb)
+
+tag_data$index = NULL
+
+
+```
+
+## find the year in time stamp
+
+```{r find the year in time stamp}
+
+
+tag_time = map(.x = tag_data$timestamp, 
+               function(.x) return(.x %>% substring(1, 4) %>% as.numeric)) %>% 
+           unlist
+
+
+tag_data$timestamp = tag_time
+
+remove(tag_time)
+
+tag_data %>% head
+
+tag_year = tag_data %>% select(timestamp) %>% distinct() %>% unlist %>% unname %>% sort()
+
+
+
+```
+
+
+## First, we do the tokenization on whole dataset view the uni prob of each year
+```{r do the tokenization whole data}
+
+
+#whole data
+uni_prob = tag_data %>% 
+           unnest_tokens(word, tag) %>% 
+           anti_join(stop_words, by = "word") %>%
+           count(word, sort = T) %>% 
+           mutate(p = n / sum(n))
+
+uni_prob %>% as.data.frame() %>% head(30)
+
+```
+
+```{r do the tokenization each year}
+
+#each year
+uni_prob_each_year = map(.x = tag_year, function(.x){
+                                                      uni_prob_local = tag_data %>% 
+                                                                       filter(timestamp == .x) %>% 
+                                                                       unnest_tokens(word, tag) %>% 
+                                                                       anti_join(stop_words, by = "word") %>%
+                                                                       count(word, sort = T) %>%
+                                                                       mutate(p = n / sum(n))
+                                                      return(uni_prob_local)
+                                        }
+                         )
+
+names(uni_prob_each_year) = tag_year
+
+uni_prob_each_year[[2]]
+
+
+```
+
+```{r do the tokenization each movie each year}
+
+
+uni_prob_each_year_function = function(tag_movie_df){
+  uni_prob_each_year_specific_movie = map(.x = tag_year, 
+                                          function(.x){
+                                            return(tag_movie_df %>%
+                                                     filter(timestamp == .x) %>% 
+                                                     unnest_tokens(word, tag) %>% 
+                                                     anti_join(stop_words, by = "word") %>%
+                                                     count(word, sort = T) %>%
+                                                     mutate(percent = 100*n / sum(n))
+                                                   )  
+                                          }
+                                          )
+  names(uni_prob_each_year_specific_movie) = tag_year
+  return(uni_prob_each_year_specific_movie)
+}
+
+
+
+i = 1
+n = nrow(movie_data)
+
+cl = makeCluster(8)
+
+registerDoParallel(cl)
+
+uni_prob_each_movie_each_year = foreach(i = 1:n, 
+                                        .packages = c("dplyr", "tidytext", "purrr", "tcltk")) %dopar% {
+                                          
+                                          tag_movie_df = tag_data %>% filter(movieId == i)
+                                          
+                                          if(!exists("pb")) pb <- tkProgressBar("Parallel task", min=0, max=1)
+                                          
+                                          info <- sprintf("Completeness %d%%",round(i*100/n))
+                                          setTkProgressBar(pb,i/n ,sprintf("Progress (%s)",info),info)
+                                          
+                                          return(uni_prob_each_year_function(tag_movie_df))
+                                          
+                                        }
+
+
+stopCluster(cl)
+
+names(uni_prob_each_movie_each_year) = movie_data %>% select(title) %>% unlist %>% as.character()
+
+uni_prob_each_movie_each_year[[1]]
+```
+
+## We can make a function to output a series of charts by deciding the movieId
+
+```{r make diagrams}
+
+shiny_APP_pie_chart = function(Id){
+  
+  
+  
+  #========================create radio icon=====================
+  
+  
+  
+  df = uni_prob_each_movie_each_year[[Id]]
+  
+  i = 1
+  n = length(df)
+  df_seq = c()
+  counter = 1
+  
+  for(i in seq(i:n)){
+    if(df[[i]] %>% nrow() != 0){
+      df_seq[counter] = i
+      counter = counter + 1
+    }
+  }
+  
+  df = df[df_seq]
+  
+  icon_list = map(.x = seq(1:length(df)), function(.x) return(.x))
+  names(icon_list) = names(df)
+  
+  
+  
+  #========================create radio icon=====================
+  
+  
+  
+  
+  
+  #==========================create UI============================
+  ui = shinyUI(fluidPage(
+    titlePanel("Pie Chart"), 
+    
+    sidebarLayout(
+      sidebarPanel(
+        radioButtons(inputId = "Radio", 
+                     label = h3("Select Year"), 
+                     choices = icon_list)
+      ), 
+      
+      mainPanel(highchartOutput("hcontainer",height = "700px"))
+    )
+    
+    
+    
+  ))
+  
+  #==========================create UI============================
+  
+  
+  #=========================create server===========================
+  
+  server = function(input, output){
+    output$hcontainer = renderHighchart({
+      
+      
+      
+      df = df[[as.numeric(input$Radio)]]
+      
+      year = names(icon_list)[as.numeric(input$Radio)]
+      
+      hc = highchart() %>%
+        hc_title(text = sprintf("%s Tag Pie Chart", year), style = list(fontSize = "35px")) %>% 
+        hc_add_series(df, "pie", hcaes(name = word, y = percent), name = "percentage") %>% 
+        hc_subtitle(text = movie_data %>% 
+                      filter(real_Id == Id) %>% 
+                      select(title) %>% 
+                      unlist %>% 
+                      as.character(), 
+                    style = list(fontSize = "20px"))
+      
+      hc
+    }
+    
+    
+    
+    )
+    
+    
+    
+    
+  }
+  
+  
+  
+  #=========================create server===========================
+  
+  
+  
+  
+  
+  return(
+    shinyApp(ui = ui, server = server)
+  )
+  
+}
+
+
+```
+
+## Demo
+
+```{r}
+
+#Demo Full Metal Jacket
+
+shiny_APP_pie_chart(Id = 1197)
+
+
+
+```
